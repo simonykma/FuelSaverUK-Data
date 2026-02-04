@@ -1,0 +1,2 @@
+# Python dependencies for GOV UK Fuel Finder API fetch script
+requests>=2.31.0
