@@ -34,9 +34,21 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # GOV UK Fuel Finder API endpoints
-# Reference: GOV UK Fuel Finder REST API documentation
-TOKEN_URL = "https://api.fuelfinder.service.gov.uk/api/v1/oauth/generate_access_token"
-PRICES_URL = "https://api.fuelfinder.service.gov.uk/v1/prices"
+# Note: The service portal is at www.fuel-finder.service.gov.uk (with hyphen)
+# The API endpoint may use the same hyphenated domain pattern
+# We try multiple possible base URLs
+
+# Possible API base URLs (in order of likelihood)
+API_BASE_URLS = [
+    "https://api.fuel-finder.service.gov.uk",      # Hyphenated (matches portal)
+    "https://api.fuelfinder.service.gov.uk",       # Non-hyphenated (from docs)
+    "https://fuel-finder.service.gov.uk/api",      # Subdirectory pattern
+]
+
+# Token endpoint path
+TOKEN_PATH = "/api/v1/oauth/generate_access_token"
+# Prices endpoint path  
+PRICES_PATH = "/v1/prices"
 
 # Fuel types as per CMA Open Data Schema
 FUEL_TYPES = ["E10", "E5", "B7", "SDV"]
@@ -45,19 +57,19 @@ FUEL_TYPES = ["E10", "E5", "B7", "SDV"]
 REQUEST_TIMEOUT = 30
 
 
-def get_access_token() -> str:
+def get_access_token() -> tuple[str, str]:
     """
     Obtain OAuth 2.0 access token using client credentials.
     
-    Tries both JSON and form-urlencoded formats as the API documentation
-    shows both formats in different places.
+    Tries multiple API base URLs and both JSON and form-urlencoded formats
+    as the documentation shows different patterns.
     
     Returns:
-        Access token string
+        Tuple of (access_token, working_base_url)
         
     Raises:
         ValueError: If credentials are not set
-        requests.HTTPError: If token request fails
+        requests.RequestException: If all attempts fail
     """
     client_id = os.environ.get("GOV_UK_CLIENT_ID")
     client_secret = os.environ.get("GOV_UK_CLIENT_SECRET")
@@ -69,43 +81,61 @@ def get_access_token() -> str:
     
     logger.info("Requesting OAuth access token...")
     
-    # Try JSON format first (as per API Docs PDF)
-    try:
-        response = requests.post(
-            TOKEN_URL,
-            json={
-                "client_id": client_id,
-                "client_secret": client_secret
-            },
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json"
-            },
-            timeout=REQUEST_TIMEOUT
-        )
-        response.raise_for_status()
-        return _extract_token(response.json())
-    except requests.RequestException as e:
-        logger.warning(f"JSON format failed: {e}, trying form-urlencoded...")
+    last_error = None
     
-    # Fallback to form-urlencoded format (as per API Authentication PDF)
-    response = requests.post(
-        TOKEN_URL,
-        data={
-            "grant_type": "client_credentials",
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "scope": "fuelfinder.read"
-        },
-        headers={
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Accept": "application/json"
-        },
-        timeout=REQUEST_TIMEOUT
-    )
+    # Try each possible base URL
+    for base_url in API_BASE_URLS:
+        token_url = f"{base_url}{TOKEN_PATH}"
+        logger.info(f"Trying token endpoint: {token_url}")
+        
+        # Try JSON format first (as per API Docs PDF)
+        try:
+            response = requests.post(
+                token_url,
+                json={
+                    "client_id": client_id,
+                    "client_secret": client_secret
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                },
+                timeout=REQUEST_TIMEOUT
+            )
+            response.raise_for_status()
+            token = _extract_token(response.json())
+            logger.info(f"Successfully obtained token from {base_url}")
+            return token, base_url
+        except requests.RequestException as e:
+            logger.warning(f"JSON format failed for {base_url}: {e}")
+            last_error = e
+        
+        # Try form-urlencoded format (as per API Authentication PDF)
+        try:
+            response = requests.post(
+                token_url,
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "scope": "fuelfinder.read"
+                },
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "application/json"
+                },
+                timeout=REQUEST_TIMEOUT
+            )
+            response.raise_for_status()
+            token = _extract_token(response.json())
+            logger.info(f"Successfully obtained token from {base_url} (form-urlencoded)")
+            return token, base_url
+        except requests.RequestException as e:
+            logger.warning(f"Form-urlencoded format failed for {base_url}: {e}")
+            last_error = e
     
-    response.raise_for_status()
-    return _extract_token(response.json())
+    # All attempts failed
+    raise requests.RequestException(f"All API base URLs failed. Last error: {last_error}")
 
 
 def _extract_token(data: dict) -> str:
@@ -124,21 +154,23 @@ def _extract_token(data: dict) -> str:
     return token
 
 
-def fetch_prices_by_fuel_type(token: str, fuel_type: str) -> list[dict[str, Any]]:
+def fetch_prices_by_fuel_type(token: str, base_url: str, fuel_type: str) -> list[dict[str, Any]]:
     """
     Fetch fuel prices for a specific fuel type.
     
     Args:
         token: OAuth access token
+        base_url: Working API base URL
         fuel_type: Fuel type code (E10, E5, B7, SDV)
         
     Returns:
         List of station dictionaries
     """
-    logger.info(f"Fetching {fuel_type} prices...")
+    prices_url = f"{base_url}{PRICES_PATH}"
+    logger.info(f"Fetching {fuel_type} prices from {prices_url}...")
     
     response = requests.get(
-        PRICES_URL,
+        prices_url,
         params={"fuel_type": fuel_type},
         headers={
             "Authorization": f"Bearer {token}",
@@ -263,7 +295,7 @@ def transform_to_cma_format(stations: list[dict[str, Any]]) -> list[dict[str, An
     return transformed
 
 
-def fetch_all_prices(token: str) -> list[dict[str, Any]]:
+def fetch_all_prices(token: str, base_url: str) -> list[dict[str, Any]]:
     """
     Fetch all fuel prices from GOV UK API.
     
@@ -271,6 +303,7 @@ def fetch_all_prices(token: str) -> list[dict[str, Any]]:
     
     Args:
         token: OAuth access token
+        base_url: Working API base URL
         
     Returns:
         List of aggregated station dictionaries
@@ -279,7 +312,7 @@ def fetch_all_prices(token: str) -> list[dict[str, Any]]:
     
     for fuel_type in FUEL_TYPES:
         try:
-            stations = fetch_prices_by_fuel_type(token, fuel_type)
+            stations = fetch_prices_by_fuel_type(token, base_url, fuel_type)
             all_stations.extend(stations)
         except requests.HTTPError as e:
             logger.error(f"Failed to fetch {fuel_type} prices: {e}")
@@ -322,11 +355,11 @@ def main() -> int:
     try:
         logger.info("Starting GOV UK Fuel Finder data fetch...")
         
-        # Get OAuth token
-        token = get_access_token()
+        # Get OAuth token (also returns working base URL)
+        token, base_url = get_access_token()
         
-        # Fetch all prices
-        stations = fetch_all_prices(token)
+        # Fetch all prices using the working base URL
+        stations = fetch_all_prices(token, base_url)
         
         if not stations:
             logger.error("No stations fetched")
