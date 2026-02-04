@@ -1,0 +1,70 @@
+# GitHub Actions workflow to fetch GOV UK Fuel Finder data
+# Runs every 30 minutes to match GOV UK API SLA (data updated within 30 minutes)
+
+name: Fetch GOV UK Fuel Prices
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'  # Every 30 minutes
+  workflow_dispatch:         # Manual trigger for testing
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  fetch-data:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: 'scripts/requirements.txt'
+      
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
+      
+      - name: Fetch GOV UK Fuel Prices
+        env:
+          GOV_UK_CLIENT_ID: ${{ secrets.GOV_UK_CLIENT_ID }}
+          GOV_UK_CLIENT_SECRET: ${{ secrets.GOV_UK_CLIENT_SECRET }}
+        run: python scripts/fetch_gov_uk_data.py
+      
+      - name: Verify output file
+        run: |
+          if [ ! -f data/uk-fuel-prices.json ]; then
+            echo "Error: uk-fuel-prices.json not found"
+            exit 1
+          fi
+          echo "=== Data Summary ==="
+          jq -r '"Last updated: \(.last_updated)"' data/uk-fuel-prices.json
+          jq -r '"Station count: \(.station_count)"' data/uk-fuel-prices.json
+      
+      - name: Upload artifact for Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: 'data'
+
+  deploy:
+    needs: fetch-data
+    runs-on: ubuntu-latest
+    
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
