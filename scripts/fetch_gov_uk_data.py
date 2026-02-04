@@ -49,6 +49,9 @@ def get_access_token() -> str:
     """
     Obtain OAuth 2.0 access token using client credentials.
     
+    Tries both JSON and form-urlencoded formats as the API documentation
+    shows both formats in different places.
+    
     Returns:
         Access token string
         
@@ -66,28 +69,49 @@ def get_access_token() -> str:
     
     logger.info("Requesting OAuth access token...")
     
-    # GOV UK Fuel Finder uses JSON body for token request
-    # Reference: Fuel Finder - API Docs.pdf
+    # Try JSON format first (as per API Docs PDF)
+    try:
+        response = requests.post(
+            TOKEN_URL,
+            json={
+                "client_id": client_id,
+                "client_secret": client_secret
+            },
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            },
+            timeout=REQUEST_TIMEOUT
+        )
+        response.raise_for_status()
+        return _extract_token(response.json())
+    except requests.RequestException as e:
+        logger.warning(f"JSON format failed: {e}, trying form-urlencoded...")
+    
+    # Fallback to form-urlencoded format (as per API Authentication PDF)
     response = requests.post(
         TOKEN_URL,
-        json={
+        data={
+            "grant_type": "client_credentials",
             "client_id": client_id,
-            "client_secret": client_secret
+            "client_secret": client_secret,
+            "scope": "fuelfinder.read"
         },
         headers={
-            "Content-Type": "application/json",
+            "Content-Type": "application/x-www-form-urlencoded",
             "Accept": "application/json"
         },
         timeout=REQUEST_TIMEOUT
     )
     
     response.raise_for_status()
-    
-    data = response.json()
-    
-    # Handle both possible response formats
+    return _extract_token(response.json())
+
+
+def _extract_token(data: dict) -> str:
+    """Extract access token from response data."""
+    # Handle wrapped format: {"success": true, "data": {"access_token": "..."}}
     if data.get("success") and "data" in data:
-        # Format: {"success": true, "data": {"access_token": "..."}}
         token = data["data"].get("access_token")
     else:
         # Standard OAuth format: {"access_token": "..."}
