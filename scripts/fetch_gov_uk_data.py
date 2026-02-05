@@ -39,15 +39,23 @@ logger = logging.getLogger(__name__)
 # Note: API requires access from UK-based network
 API_BASE_URL = "https://www.fuel-finder.service.gov.uk"
 
-# Token endpoint path (from API Docs PDF)
-# POST /api/v1/oauth/generate_access_token
-TOKEN_PATH = "/api/v1/oauth/generate_access_token"
+# Token endpoint paths to try (different docs show different endpoints)
+# 1. API Docs PDF shows: POST /api/v1/oauth/generate_access_token (JSON body)
+# 2. API Authentication PDF shows standard OAuth 2.0 (form-urlencoded)
+TOKEN_PATHS = [
+    "/api/v1/oauth/generate_access_token",  # From API Docs PDF
+    "/oauth/token",                          # Standard OAuth 2.0 pattern
+    "/api/oauth/token",                      # Alternative pattern
+    "/v1/oauth/token",                       # Version prefixed
+]
 
-# Prices endpoint path (from Rest API PDF)
-# GET /v1/prices
+# Prices endpoint path (from Rest API PDF and API Authentication PDF)
+# GET /v1/prices?fuel_type=unleaded
 PRICES_PATH = "/v1/prices"
 
 # Fuel types as per CMA Open Data Schema
+# API Authentication PDF shows: fuel_type=unleaded
+# We map to standard codes
 FUEL_TYPES = ["E10", "E5", "B7", "SDV"]
 
 # Request timeout in seconds
@@ -58,15 +66,15 @@ def get_access_token() -> str:
     """
     Obtain OAuth 2.0 access token using client credentials.
     
-    Tries both JSON and form-urlencoded formats as the documentation
-    shows both formats in different places.
+    Tries multiple endpoint paths and both JSON and form-urlencoded formats
+    as the documentation shows different approaches.
     
     Returns:
         Access token string
         
     Raises:
         ValueError: If credentials are not set
-        requests.RequestException: If token request fails
+        requests.RequestException: If all token requests fail
     """
     client_id = os.environ.get("GOV_UK_CLIENT_ID")
     client_secret = os.environ.get("GOV_UK_CLIENT_SECRET")
@@ -76,46 +84,82 @@ def get_access_token() -> str:
             "Missing OAuth credentials. Set GOV_UK_CLIENT_ID and GOV_UK_CLIENT_SECRET environment variables."
         )
     
-    token_url = f"{API_BASE_URL}{TOKEN_PATH}"
-    logger.info(f"Requesting OAuth access token from {token_url}...")
+    last_error = None
     
-    # Try JSON format first (as per API Docs PDF)
-    try:
-        response = requests.post(
-            token_url,
-            json={
-                "client_id": client_id,
-                "client_secret": client_secret
-            },
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json"
-            },
-            timeout=REQUEST_TIMEOUT
-        )
-        response.raise_for_status()
-        return _extract_token(response.json())
-    except requests.RequestException as e:
-        logger.warning(f"JSON format failed: {e}, trying form-urlencoded...")
+    for token_path in TOKEN_PATHS:
+        token_url = f"{API_BASE_URL}{token_path}"
+        logger.info(f"Trying token endpoint: {token_url}")
+        
+        # Try 1: JSON format (as per API Docs PDF)
+        try:
+            response = requests.post(
+                token_url,
+                json={
+                    "client_id": client_id,
+                    "client_secret": client_secret
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                },
+                timeout=REQUEST_TIMEOUT
+            )
+            if response.status_code == 200:
+                logger.info(f"Success with JSON format at {token_path}")
+                return _extract_token(response.json())
+            logger.warning(f"JSON format returned {response.status_code}: {response.text[:200]}")
+        except requests.RequestException as e:
+            logger.warning(f"JSON format failed for {token_path}: {e}")
+            last_error = e
+        
+        # Try 2: Form-urlencoded with all OAuth fields (as per API Authentication PDF)
+        try:
+            response = requests.post(
+                token_url,
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "scope": "fuelfinder.read"
+                },
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "application/json"
+                },
+                timeout=REQUEST_TIMEOUT
+            )
+            if response.status_code == 200:
+                logger.info(f"Success with form-urlencoded at {token_path}")
+                return _extract_token(response.json())
+            logger.warning(f"Form-urlencoded returned {response.status_code}: {response.text[:200]}")
+        except requests.RequestException as e:
+            logger.warning(f"Form-urlencoded failed for {token_path}: {e}")
+            last_error = e
+        
+        # Try 3: Basic Auth with client credentials (alternative OAuth pattern)
+        try:
+            response = requests.post(
+                token_url,
+                data={
+                    "grant_type": "client_credentials",
+                    "scope": "fuelfinder.read"
+                },
+                auth=(client_id, client_secret),
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "application/json"
+                },
+                timeout=REQUEST_TIMEOUT
+            )
+            if response.status_code == 200:
+                logger.info(f"Success with Basic Auth at {token_path}")
+                return _extract_token(response.json())
+            logger.warning(f"Basic Auth returned {response.status_code}: {response.text[:200]}")
+        except requests.RequestException as e:
+            logger.warning(f"Basic Auth failed for {token_path}: {e}")
+            last_error = e
     
-    # Fallback to form-urlencoded format (as per API Authentication PDF)
-    response = requests.post(
-        token_url,
-        data={
-            "grant_type": "client_credentials",
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "scope": "fuelfinder.read"
-        },
-        headers={
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Accept": "application/json"
-        },
-        timeout=REQUEST_TIMEOUT
-    )
-    
-    response.raise_for_status()
-    return _extract_token(response.json())
+    raise requests.RequestException(f"All token endpoints failed. Last error: {last_error}")
 
 
 def _extract_token(data: dict) -> str:
