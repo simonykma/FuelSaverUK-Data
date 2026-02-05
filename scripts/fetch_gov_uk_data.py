@@ -39,11 +39,13 @@ logger = logging.getLogger(__name__)
 # Note: API requires access from UK-based network
 API_BASE_URL = "https://www.fuel-finder.service.gov.uk"
 
-# Token endpoint path (OAuth 2.0 client credentials)
+# Token endpoint path (from API Docs PDF)
+# POST /api/v1/oauth/generate_access_token
 TOKEN_PATH = "/api/v1/oauth/generate_access_token"
 
-# Prices endpoint path
-PRICES_PATH = "/api/v1/prices"
+# Prices endpoint path (from Rest API PDF)
+# GET /v1/prices
+PRICES_PATH = "/v1/prices"
 
 # Fuel types as per CMA Open Data Schema
 FUEL_TYPES = ["E10", "E5", "B7", "SDV"]
